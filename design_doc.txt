@@ -1,0 +1,11 @@
+Hello This is the design document for the raft implementation. LESSGOOO!
+
+Current Understanding : 
+
+    1. UI thread to take input -> Question, should the user be able to send another request till the response is recv for the prev one? (NFC) I think we will wait, cause makes life easy.
+
+        Each user command should have an id : id can be < cid, idx of the request > -> need to maintain that in the state file then lol (cause crash life)
+
+    2. maintain the timeout for the follower state change -> need to create the thread for the same 
+
+    3. implement the followers logic along with the RPC's 
