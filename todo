@@ -1,0 +1,19 @@
+1. make peers recoverable : kill and bring it back up, other peers should be able to connect back with it
+2. save persistent state to disk :  but when ??
+3.
+
+
+open questions :
+1. should we have heartbeat timeout individually for each peer
+2. should we not send a heartbeat, until we get a response back from the peer!
+
+log structure considerations:
+1. adding a common log to the beginning of every peer log for ease of implementation
+2. What if the client sending the message is the leader ?! - done
+3. leader should set the peer_next_log to latest for a peer when a new peer joins!
+
+
+async client considerations :
+1. if a client sends multiple requests, what if req1,2 go through, and the third fails. Should we allow 4,5 to go through.
+2. if 3 fails, should the client retry.
+3.

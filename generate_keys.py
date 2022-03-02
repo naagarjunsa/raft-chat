@@ -1,9 +1,9 @@
 import rsa
 import pickle
 
-keys = list()
-for i in range(5):
-    keys.append(rsa.newkeys(16))
+keys = dict()
+for i in range(1, 6):
+    keys[str(i)] = rsa.newkeys(16)
 
 with open('keystore.obj', 'wb') as keystore:
     pickle.dump(keys, keystore)
