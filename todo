@@ -27,3 +27,7 @@ use re-entrant locks!
 cannot use long messages for testing. Limitation of rsa. Any other algo to be considered ?
 
 let every client maintain all the groups ? - yes
+
+
+TODO :
+for kick, do not delete the entry from tha dict

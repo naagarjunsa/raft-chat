@@ -13,11 +13,11 @@ class Client_Menu:
 
     @staticmethod
     def display_menu():
-        # logger.info("- Press 1 to CreateGroup") createGroup 1 2 4 - done
-        # logger.info("- Press 2 to Add Member") add 2_2 5 - done
-        # logger.info("- Press 3 to Kick Member")
+        # logger.info("- Press 1 to CreateGroup") createGroup 1 2 3 - done
+        # logger.info("- Press 2 to Add Member")  add 2_1 5 - done
+        # logger.info("- Press 3 to Kick Member") kick 2_1 5 - done
         # logger.info("- Press 4 to Write Message")
-        # logger.info("- Press 5 to Print Group") printGroup 2_1 - bleh
+        # logger.info("- Press 5 to Print Group") printGroup 2_1
         # logger.info("- Press 6 to Fail Link")
         # logger.info("- Press 7 to Fix Link")
         # logger.info("- Press 8 to Fail Process") - done

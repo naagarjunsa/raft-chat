@@ -112,6 +112,7 @@ class Group:
         self.public_key = public_key
         self.private_key = private_key
         self.client_id_list = client_id_list
+        self.messages = []
 
 
 class Log_entry_type(enum.Enum):

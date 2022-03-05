@@ -192,7 +192,7 @@ class Client:
             if flag:
                 logger.info("someone sent append rpc - restart the sending of heartbeat")
             else:
-                logger.info("time to send heartbeats")
+                logger.debug("time to send heartbeats")
                 self.send_heartbeats_to_peers()
 
             self.sent_heartbeat_event.clear()
@@ -228,7 +228,7 @@ class Client:
         time.sleep(1)
 
         for peer_id in self.peer_conn_dict:
-            logger.info(f"Sending append entries to client.")
+            logger.debug(f"Sending append entries to client.")
             # self.send_msg_to_peer(peer_id, request)
             with self.restoration_lock:
                 if self.restoration_in_progress[peer_id]:
@@ -314,7 +314,7 @@ class Client:
             elif action == "add":
                 self.handle_add_member(user_input[1:])
             elif action == "kick":
-                pass
+                self.handle_kick_member(user_input[1:])
             elif action == "writeMessage":
                 pass
             elif action == "printGroup":
@@ -408,7 +408,7 @@ class Client:
             #                                   entries=[log_entry])
 
     def handle_respond_entry(self, req, sender_id):
-        logger.info("RESPOND_ENTRY received from " + str(sender_id) + " " + str(req))
+        logger.debug("RESPOND_ENTRY received from " + str(sender_id) + " " + str(req))
         term = req[TERM_KEY]
         is_success = req[SUCCESS]
 
@@ -609,7 +609,7 @@ class Client:
 
     @staticmethod
     def generate_encryption_keys_for_group():
-        return rsa.newkeys(16)
+        return rsa.newkeys(512)
 
     @staticmethod
     def get_string_from_private_key(private_key):
@@ -730,6 +730,8 @@ class Client:
                 self.handle_create_entry(command)
             elif command[LOG_ENTRY_TYPE] == Log_entry_type.ADD_ENTRY:
                 self.handle_add_entry(command)
+            elif command[LOG_ENTRY_TYPE] == Log_entry_type.KICK_ENTRY:
+                self.handle_kick_entry(command)
             else:
                 logger.warning(f"This action cannot be handled : {command[ACTION]}")
 
@@ -740,8 +742,6 @@ class Client:
             logger.warning("I am not a part of this new group. sed")
             return
         group_id = command[GROUP_ID]
-        print(group_id)
-        print(client_id_list)
         group_public_key = command[GROUP_PUBLIC_KEY]
         group_private_key = self.get_private_key_from_string(
             rsa.decrypt(command[ENCRYPTED_GROUP_PRIVATE_KEYS_DICT][self.client_id], self.private_key))
@@ -781,6 +781,25 @@ class Client:
             self.groups_dict[group_id] = new_group
             logger.info(f"successfully added self to new group with id : {group_id}")
 
+    def handle_kick_entry(self, command):
+        group_id = command[GROUP_ID]
+        client_id_to_kick = command[CLIENT_ID]
+        if group_id not in self.groups_dict:
+            logger.debug("This kick entry doesn't concern me. ")
+
+        elif client_id_to_kick != self.client_id:
+            group = self.groups_dict[group_id]
+            group.client_id_list.remove(client_id_to_kick)
+            logger.debug(f"Kicked member {client_id_to_kick} from group : {group_id}")
+            group_public_key = command[GROUP_PUBLIC_KEY]
+            group_private_key = self.get_private_key_from_string(
+                rsa.decrypt(command[ENCRYPTED_GROUP_PRIVATE_KEYS_DICT][self.client_id], self.private_key))
+            group.public_key = group_public_key
+            group.private_key = group_private_key
+
+        else:
+            del self.groups_dict[group_id]
+            logger.info(f"successfully deleted self from group with id : {group_id}")
 
     def display_groups(self):
         logger.info("Following are the groups I am a part of : ")
@@ -816,33 +835,63 @@ class Client:
         time.sleep(1)
         self.send_msg_to_peer(self.leader_id, log_entry_request)
 
+    def handle_kick_member(self, param):
+        group_id = param[0]
+        client_id_to_kick = param[1]
+        # if group_id not in self.groups_dict:
+        #     logger.warning("Oops! Cannot kick a member from an alien group..")
+        #
+        # elif client_id_to_kick not in self.peer_conn_dict or client_id != self.client_id:
+        #     logger.warning("Invalid client it. Aborting..")
+        #
+        # elif client_id_to_kick not in self.groups_dict[group_id].client_id_list:
+        #     logger.info("Client already absent from this group..")
+
+        # else:
+        group_public_key, group_private_key = self.generate_encryption_keys_for_group()
+        client_id_list = list(self.groups_dict[group_id].client_id_list)
+        client_id_list.remove(client_id_to_kick)
+        encrypted_group_private_key_dict = self.encrypt_group_private_key(group_private_key, client_id_list)
+
+        command = {
+            LOG_ENTRY_TYPE: Log_entry_type.KICK_ENTRY,
+            REQUEST_ID: self.generate_request_id(),
+            GROUP_ID: group_id,
+            CLIENT_ID: client_id_to_kick,
+            GROUP_PUBLIC_KEY: group_public_key,
+            ENCRYPTED_GROUP_PRIVATE_KEYS_DICT: encrypted_group_private_key_dict
+        }
+        time.sleep(1)
+        log_entry_request = self.get_client_log_entry_request(command)
+        self.send_msg_to_peer(self.leader_id, log_entry_request)
+
     def handle_add_member(self, param):
         group_id = param[0]
         client_id_to_add = param[1]
-        if group_id not in self.groups_dict:
-            logger.warning("Oops! Cannot add a member to an alien group..")
+        # if group_id not in self.groups_dict:
+        #     logger.warning("Oops! Cannot add a member to an alien group..")
+        #
+        # elif client_id_to_add not in self.peer_conn_dict:
+        #     logger.warning("Invalid client it. Aborting..")
+        #
+        # elif client_id_to_add in self.groups_dict[group_id].client_id_list:
+        #     logger.info("Client already added to this group..")
 
-        elif client_id_to_add not in self.peer_conn_dict:
-            logger.warning("Invalid client it. Aborting..")
-
-        elif client_id_to_add in self.groups_dict[group_id].client_id_list:
-            logger.info("Client already added to this group..")
-
-        else:
-            group_private_key_encrypted = rsa.encrypt(
-                self.get_string_from_private_key(self.groups_dict[group_id].private_key),
-                self.public_keys_dict[client_id_to_add])
-            command = {
-                LOG_ENTRY_TYPE: Log_entry_type.ADD_ENTRY,
-                REQUEST_ID: self.generate_request_id(),
-                GROUP_ID: group_id,
-                CLIENT_ID: client_id_to_add,
-                ENCRYPTED_GROUP_PRIVATE_KEY: group_private_key_encrypted
-            }
-            # TODO: how to get the current term
-            log_entry_request = self.get_client_log_entry_request(command)
-            time.sleep(1)
-            self.send_msg_to_peer(self.leader_id, log_entry_request)
+        # else:
+        group_private_key_encrypted = rsa.encrypt(
+            self.get_string_from_private_key(self.groups_dict[group_id].private_key),
+            self.public_keys_dict[client_id_to_add])
+        command = {
+            LOG_ENTRY_TYPE: Log_entry_type.ADD_ENTRY,
+            REQUEST_ID: self.generate_request_id(),
+            GROUP_ID: group_id,
+            CLIENT_ID: client_id_to_add,
+            ENCRYPTED_GROUP_PRIVATE_KEY: group_private_key_encrypted
+        }
+        # TODO: how to get the current term
+        log_entry_request = self.get_client_log_entry_request(command)
+        time.sleep(1)
+        self.send_msg_to_peer(self.leader_id, log_entry_request)
 
 
 if __name__ == '__main__':
