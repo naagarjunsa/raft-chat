@@ -1,28 +1,21 @@
-import pickle
-import uuid
-from random import randint
+import selectors
+import json
+import logging
+import pathlib
 import selectors
 import socket
-import logging
-import json
 import sys
-import pathlib
-import os
 import time
-import threading
 import types
-from queue import Queue
-import enum
-from typing import Dict
 
 import rsa
 
-from constants import *
+from client_menu import Client_Menu
 from util_classes import *
 
 logging.basicConfig(format='%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
                     datefmt='%Y-%m-%d:%H:%M:%S',
-                    level=logging.DEBUG)
+                    level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +25,11 @@ class Client:
 
     def __init__(self, client_id, clients_info):
 
+        self.client_menu = Client_Menu()
+
+        # to store all the groups the client is a part of
+        self.groups_dict = dict()
+
         # config file state
         self.peer_next_log_index = dict()
         self.restoration_in_progress = dict()
@@ -39,6 +37,7 @@ class Client:
         self.client_id = client_id
         self.clients_info = clients_info
         self.restoration_lock = threading.Lock()
+        self.majority = (len(self.clients_info)) // 2 + 1
 
         # application related state
         self.private_key, self.public_keys_dict = self.load_keys(self.client_id)
@@ -48,14 +47,11 @@ class Client:
 
         # load state from file if existed before
         self.state_file = 'raft-state-%s' % self.client_id
+        self.persisted_state_path = os.path.join(State.save_dir, f'raft-state-{self.client_id}.pickle')
         self.load_state()
-        self.entries = list()
         self.leader_id = None
         self.votes_recvd = 0
         self.role = Role.FOLLOWER
-
-        # group attributes
-        self.group_counter = 0
 
         self.server_flag = threading.Event()
         self.server_flag.set()
@@ -93,14 +89,23 @@ class Client:
 
     def load_state(self):
         # just to enable intellisense
-        self.state = State(0, None, [LogEntry(0, 0, Command(0, 'START'))])
+        self.state = None
         try:
-            with open(self.state_file, 'r') as f:
+            with open(self.persisted_state_path, 'rb') as f:
                 self.state = pickle.load(f)
-        except Exception as e:
-            # self.state = State(0, None, list())
+                logger.info("state was retrieved successfully!")
+                # act on the entries once the process comes back up
+                self.act_on_commited_entries(1, self.state.commit_idx)
+        except Exception as ex:
+            self.state = State(0, None, [LogEntry(0, 0, {LOG_ENTRY_TYPE: Log_entry_type.DUMMY})])
             logger.warning("No restoration file found!")
-            pass
+            logger.error(ex)
+
+    def save_state(self):
+        with self.state.lock:
+            with open(self.persisted_state_path, 'wb') as handle:
+                pickle.dump(self.state, handle)
+                logger.info("State was successfully persisted!")
 
     @staticmethod
     def load_keys(client_idx):
@@ -111,19 +116,6 @@ class Client:
             for client_id, keys in keys_dict.items():
                 client_id_public_key_dict[client_id] = keys[1]
         return private_key, client_id_public_key_dict
-
-    @staticmethod
-    def display_menu():
-        logger.info("- Press 1 to CreateGroup")
-        logger.info("- Press 2 to Add Member")
-        logger.info("- Press 3 to Kick Member")
-        logger.info("- Press 4 to Write Message")
-        logger.info("- Press 5 to Print Group")
-        logger.info("- Press 6 to Fail Link")
-        logger.info("- Press 7 to Fix Link")
-        logger.info("- Press 8 to Fail Process")
-        # TODO : delete this later
-        logger.info("- Press 9 to display logs")
 
     @staticmethod
     def accept_wrapper(sock, selector):
@@ -164,7 +156,7 @@ class Client:
         # can go to candiate with timeout (otherwise will always be follower)
 
         while self.heartbeat_event.wait(timeout=self.heartbeat_timeout):
-            logger.info("hearbeat recvd")
+            logger.debug("hearbeat recvd")
             self.heartbeat_event.clear()
             # repeat the waiting for heartbeat
 
@@ -188,8 +180,7 @@ class Client:
         logger.info("\n\n\n\nGUESSS WHO IS LEADER BITCHESSSSSS!!!!!\n\n\n")
         # send appendrpc to all peers in heartbeat time
         self.initialize_peer_next_log_index()
-        self.send_append_entries_to_peers(last_log_index=self.state.get_last_log_index(),
-                                          last_log_term=self.state.get_last_log_term())
+        self.send_heartbeats_to_peers()
 
         while self.role == Role.LEADER:
             # TODO:  fix the timeout value
@@ -202,8 +193,7 @@ class Client:
                 logger.info("someone sent append rpc - restart the sending of heartbeat")
             else:
                 logger.info("time to send heartbeats")
-                self.send_append_entries_to_peers(last_log_index=self.state.get_last_log_index(),
-                                                  last_log_term=self.state.get_last_log_term())
+                self.send_heartbeats_to_peers()
 
             self.sent_heartbeat_event.clear()
 
@@ -225,17 +215,15 @@ class Client:
         logger.info("Trying to send Append entry to client to make logs consistent : ")
         self.send_msg_to_peer(recipient_id, request)
 
-    def send_append_entries_to_peers(self, last_log_index, last_log_term, entries=None):
-
-        if entries is None:
-            entries = []
-        request = {EVENT_KEY: Event.APPEND_ENTRY,
-                   SENDER_ID: self.client_id,
-                   TERM_KEY: self.state.curr_term,
-                   PREV_LOG_IDX: last_log_index,
-                   PREV_LOG_TERM: last_log_term,
-                   ENTRIES: entries,
-                   COMMIT_IDX: self.state.commit_idx}
+    def send_heartbeats_to_peers(self):
+        with self.state.lock:
+            request = {EVENT_KEY: Event.APPEND_ENTRY,
+                       SENDER_ID: self.client_id,
+                       TERM_KEY: self.state.curr_term,
+                       PREV_LOG_IDX: self.state.get_last_log_index(),
+                       PREV_LOG_TERM: self.state.get_last_log_term(),
+                       ENTRIES: [],
+                       COMMIT_IDX: self.state.commit_idx}
 
         time.sleep(1)
 
@@ -305,27 +293,37 @@ class Client:
         user_req_id = 0
         while True:
             user_req_id += 1
-            self.display_menu()
-            # Press 1 to CreateGroup")
-            # Press 2 to Add Member")
-            # Press 3 to Kick Member")
-            # Press 4 to Write Message")
-            # Press 5 to Print Group")
-            # Press 6 to Fail Link")
-            # Press 7 to Fix Link")
-            # Press 8 to Fail Process")
-            # Press 9 to display logs")
-            user_input = input("Client prompt >> ").strip()
-            if user_input == "1":
-                self.handle_create_group()
-            elif user_input == "2":
-                # TODO: just testting append RPC for now
-                self.send_new_command_to_leader()
+            self.client_menu.display_menu()
+            # first ever command implemented
+            # self.send_new_command_to_leader()
+            # logger.info(" - createGroup <client_ids>")
+            # logger.info(" - add <group id> <client id>")
+            # logger.info(" - kick <group id> <client id>")
+            # logger.info(" - writeMessage <group id> <message>")
+            # logger.info(" - printGroup <group id>")
+            # logger.info(" - failLink <src> <dest>")
+            # logger.info(" - fixLink <src> <dest>")
+            # logger.info(" - failProcess")
+            user_input = input("Client prompt >> ").strip().split()
 
-            elif user_input == "3":
-                # tell the snapshot thread by adding the event into the snapshot queue
-                self.snapshot_thread_queue.put({"type": Event.INIT_SNAPSHOT, "balance": self.balance})
-            elif user_input == "4":
+            if not user_input:
+                continue
+            action = user_input[0]
+            if action == "createGroup":
+                self.handle_create_group(user_input[1:])
+            elif action == "add":
+                self.handle_add_member(user_input[1:])
+            elif action == "kick":
+                pass
+            elif action == "writeMessage":
+                pass
+            elif action == "printGroup":
+                self.display_groups()
+            elif action == "failLink":
+                pass
+            elif action == "fixLink":
+                pass
+            elif action == "failProcess" or user_input == '4':
                 self.server_flag.clear()
                 logger.info("Until next time...")
                 break
@@ -384,21 +382,27 @@ class Client:
         elif req[EVENT_KEY] == Event.NEW_COMMAND:
             self.handle_new_command(req, sender_id)
 
+        elif req[EVENT_KEY] == Event.COMMAND_SUCCESS_NOTIFICATION:
+            self.handle_success_notification(req)
+
+        elif req[EVENT_KEY] == Event.CLIENT_REQUEST:
+            self.handle_client_request(req, sender_id)
+
+    # TODO : delete this
     def handle_new_command(self, req, sender_id):
         logger.info("NEW_COMMAND received from " + str(sender_id) + " " + str(req))
         command = req[COMMAND]
-        request_id = req[REQUEST_ID]
+        request_id = command[REQUEST_ID]
 
         if self.role == Role.LEADER:
             with self.state.lock:
-                if self.state.req_in_logs(request_id):
-                    return
-                log_entry = LogEntry(self.state.curr_term, self.state.get_last_log_index() + 1,
-                                     Command(request_id, command))
-                self.state.log.append(log_entry)
+                # if self.state.req_in_logs(request_id):
+                #     return
+                logger.info("handle new command lock acquired")
+                command = {REQUEST_ID: request_id, 'MESSAGE': command}
+                self.state.append_to_log(request_id, command)
                 # we cant maintain count as the same peer can vote twice, in case he goes down and comes back up
                 self.state.client_req_respond_count[request_id] = {self.client_id}
-
             # no need to send append entry, will be taken care by the heartbeat thread.
             # self.send_append_entries_to_peers(last_log_index=last_log_idx, last_log_term=last_log_term,
             #                                   entries=[log_entry])
@@ -420,18 +424,23 @@ class Client:
                     self.restoration_in_progress[sender_id] = True
                 peer_last_log_consistent_entry_index = self.peer_next_log_index[sender_id]
                 peer_last_log_consistent_entry_term = self.state.log[peer_last_log_consistent_entry_index].term
-                entries = self.state.log[peer_last_log_consistent_entry_index+1:]
+                entries = self.state.log[peer_last_log_consistent_entry_index + 1:]
                 self.send_append_entries_to_peer(sender_id, entries, peer_last_log_consistent_entry_index,
                                                  peer_last_log_consistent_entry_term)
             else:
                 with self.restoration_lock:
-                    self.state.update_response_count_since(self.peer_next_log_index[sender_id])
+                    prev_commit_idx = self.state.commit_idx
+                    commit_idx_updated = self.state.update_response_count_since(self.peer_next_log_index[sender_id],
+                                                                                self.majority, sender_id)
                     self.peer_next_log_index[sender_id] = self.state.get_last_log_index() + 1
                     self.restoration_in_progress[sender_id] = False
-
+                    if commit_idx_updated:
+                        self.save_state()
+                        self.act_on_commited_entries(prev_commit_idx + 1, self.state.commit_idx)
+                        self.respond_client_with_success(prev_commit_idx + 1, self.state.commit_idx)
 
     def handle_append_entry(self, req, sender_id):
-        logger.info("APPEND_ENTRY received from " + str(sender_id) + " " + str(req))
+        logger.debug("APPEND_ENTRY received from " + str(sender_id) + " " + str(req))
         term = req[TERM_KEY]
         leader_id = req[SENDER_ID]
         prev_log_idx = req[PREV_LOG_IDX]
@@ -457,9 +466,10 @@ class Client:
             # setting the leader id for each appendEntryRPC
             self.leader_id = sender_id
             # TODO: Do log consistency check
-            logger.info(
-                f"prev_log_idx : {prev_log_idx}, last_log_idx : {self.state.get_last_log_index()}, "
-                f"prev_log_term : {prev_log_term}, last_log_term : {self.state.get_last_log_term()}")
+            logger.debug(
+                f"leader_log_idx : {prev_log_idx}, last_log_idx : {self.state.get_last_log_index()}, "
+                f"leader_log_term : {prev_log_term}, last_log_term : {self.state.get_last_log_term()},"
+                f"leader_commit_idx : {commit_idx} , last_commit_idx : {self.state.commit_idx}")
 
             # the case when the follower has more entries in its log than the leader
             if self.state.get_last_log_index() > prev_log_idx:
@@ -470,14 +480,19 @@ class Client:
                 # TODO : not needed
                 # and entries[0].command == self.state.log[self.last_log_idx].command:
                 # heartbeat event, so nothing to extend
-                if not entries:
-                    return
-
-                logger.info("extending logs with entries")
-                with self.state.lock:
-                    self.state.log = self.state.log[:prev_log_idx + 1] + entries
-                logger.info(self.state.log)
+                if entries:
+                    logger.debug("extending logs with entries")
+                    with self.state.lock:
+                        self.state.log = self.state.log[:prev_log_idx + 1] + entries
+                    logger.debug(self.state.log)
+                if commit_idx > self.state.commit_idx:
+                    prev_commit_idx = self.state.commit_idx
+                    self.state.update_commit_idx(commit_idx)
+                    self.act_on_commited_entries(prev_commit_idx + 1, self.state.commit_idx)
+                    self.save_state()
+                    logger.info(f"COMMIT idx updated to {self.state.commit_idx}")
                 self.respond_entry_to_leader(term, True, sender_id)
+
 
             else:
                 logger.info("logs are not consistent. Need to go further back in time in the logs")
@@ -557,7 +572,7 @@ class Client:
                    SUCCESS: success}
 
         time.sleep(1)
-        logger.info("Sending respond entry")
+        logger.debug("Sending respond entry")
         self.send_msg_to_peer(recv_id, request)
 
     def response_vote_to_candidate(self, term, vote_granted, recv_id):
@@ -571,39 +586,15 @@ class Client:
         logger.info("Sending vote response to client")
         self.send_msg_to_peer(recv_id, request)
 
-    def handle_create_group(self):
-        group_id = self.get_new_group_id()
-        group_public_key, group_private_key = self.generate_encryption_keys_for_group()
-        logger.info("Enter the client ids that you want to add to the group, separated by space : ")
-        client_id_list = input(">").strip().split()
-        # check to see if all the client ids are valid or not!
-        if not all([client_id in self.peer_conn_dict for client_id in client_id_list]):
-            logger.warning("Some of the Client ids are not valid. Aborting process!")
-            return
-
-        encrypted_group_private_key_dict = self.encrypt_group_private_key(group_private_key, client_id_list)
-        # TODO: how to get the current term
-        log_entry_request = {
-            EVENT_KEY: Event.NEW_GROUP,
-            SENDER_ID: self.client_id,
-            TERM_KEY: self.state.curr_term,
-            GROUP_ID: group_id,
-            CLIENT_IDS: client_id_list,
-            GROUP_PUBLIC_KEY: group_public_key,
-            ENCRYPTED_GROUP_PRIVATE_KEYS_DICT: encrypted_group_private_key_dict
-        }
-        time.sleep(1)
-        self.send_msg_to_peer(self.leader_id, log_entry_request)
-
     def send_msg_to_peer(self, peer_id, request):
-        logger.info(f"Receiver_id : {peer_id} , request : {request}")
+        logger.debug(f"Receiver_id : {peer_id} , request : {request}")
         if peer_id == self.client_id:
             conn = self.self_server_conn
         else:
             conn = self.peer_conn_dict[peer_id]
         try:
             conn.sendall(pickle.dumps(request) + pickle.dumps(Event.EOM))
-            logger.info(f"Successfully sent msg to peer : {peer_id}")
+            logger.debug(f"Successfully sent msg to peer : {peer_id}")
         except Exception as ex:
             # TODO: start leader election ?! Once new leader available, retry operation!
             logger.error(f"Unable to send msg to peer : {peer_id}")
@@ -612,18 +603,32 @@ class Client:
             # del self.peer_conn_dict[peer_id]
 
     def get_new_group_id(self):
-        self.group_counter += 1
-        group_id = self.client_id + "_" + self.group_counter
+        self.state.group_counter += 1
+        group_id = self.client_id + "_" + str(self.state.group_counter)
         return group_id
 
     @staticmethod
     def generate_encryption_keys_for_group():
         return rsa.newkeys(16)
 
+    @staticmethod
+    def get_string_from_private_key(private_key):
+        print("-".join(
+            [str(i) for i in [private_key.n, private_key.e, private_key.d, private_key.p, private_key.q]]).encode(
+            'utf8'))
+        return "-".join(
+            [str(i) for i in [private_key.n, private_key.e, private_key.d, private_key.p, private_key.q]]).encode(
+            'utf8')
+
+    @staticmethod
+    def get_private_key_from_string(private_key_string):
+        splitted_list = [int(i) for i in private_key_string.decode('utf8').split('-')]
+        return rsa.key.PrivateKey(*splitted_list)
+
     def encrypt_group_private_key(self, group_private_key, client_id_list):
         client_id_group_private_key_dict = dict()
         for peer_id in client_id_list:
-            client_id_group_private_key_dict[peer_id] = rsa.encrypt(bytes(group_private_key),
+            client_id_group_private_key_dict[peer_id] = rsa.encrypt(self.get_string_from_private_key(group_private_key),
                                                                     self.public_keys_dict[peer_id])
         return client_id_group_private_key_dict
 
@@ -632,7 +637,7 @@ class Client:
             EVENT_KEY: Event.NEW_COMMAND,
             SENDER_ID: self.client_id,
             COMMAND: "new command",
-            REQUEST_ID: self.client_id + "_" + str(self.state.increment_and_get_client_counter())
+            REQUEST_ID: self.generate_request_id()
         }
         while True:
             try:
@@ -647,6 +652,15 @@ class Client:
                 # timeout for retry
                 time.sleep(3)
 
+    def get_client_log_entry_request(self, command):
+        log_entry_request = {
+            EVENT_KEY: Event.CLIENT_REQUEST,
+            SENDER_ID: self.client_id,
+            TERM_KEY: self.state.curr_term,
+            COMMAND: command
+        }
+        return log_entry_request
+
     def initialize_peer_next_log_index(self):
         # TODO :is it thread safe / should we move this to the state class
         next_log_index = self.state.get_last_log_index()
@@ -655,7 +669,6 @@ class Client:
                 self.peer_next_log_index[peer_id] = next_log_index + 1
                 self.restoration_in_progress[peer_id] = False
                 self.state.client_req_respond_count.clear()
-
 
     def connect_to_self_server(self):
         peer_addr = (self.clients_info[self.client_id]["host"], self.clients_info[self.client_id]["port"])
@@ -668,6 +681,168 @@ class Client:
         except Exception as ex:
             logger.error(f"Could not CONNECT to self server!")
             logger.error(ex)
+
+    def respond_client_with_success(self, commit_start_idx, commit_end_idx):
+        for log_entry in self.state.log[commit_start_idx: commit_end_idx + 1]:
+            request_id = log_entry.command[REQUEST_ID]
+            print(request_id)
+            initiator_id = request_id.split('_')[0]
+
+            request = {EVENT_KEY: Event.COMMAND_SUCCESS_NOTIFICATION,
+                       SENDER_ID: self.client_id,
+                       TERM_KEY: self.state.curr_term,
+                       REQUEST_ID: request_id}
+
+            # TODO: add timer
+            # time.sleep(1)
+            logger.info("Sending command commit response to client")
+            self.send_msg_to_peer(initiator_id, request)
+
+    def handle_success_notification(self, req):
+        logger.info(f"Yo! The command with the following request id was committed successfully! : {req[REQUEST_ID]} "
+                    f": by leader : {req[SENDER_ID]}")
+
+    def handle_client_request(self, req, sender_id):
+        logger.info("NEW GROUP EVENT received from " + str(sender_id) + " " + str(req))
+        command = req[COMMAND]
+        request_id = command[REQUEST_ID]
+
+        if self.role == Role.LEADER:
+            with self.state.lock:
+                # this is only needed if client retry is implemented
+                # if self.state.req_in_logs(request_id):
+                #     return
+                self.state.append_to_log(command)
+                # we cant maintain count as the same peer can vote twice, in case he goes down and comes back up
+                self.state.client_req_respond_count[request_id] = {self.client_id}
+        else:
+            # redirect the message to the leader
+            self.send_msg_to_peer(self.leader_id, req)
+
+    def generate_request_id(self):
+        return self.client_id + "_" + str(self.state.increment_and_get_client_counter())
+
+    def act_on_commited_entries(self, prev_commit_idx, commit_idx):
+        for log_entry in self.state.log[prev_commit_idx:commit_idx + 1]:
+            print("will commit an entry now")
+            command = log_entry.command
+            if command[LOG_ENTRY_TYPE] == Log_entry_type.CREATE_ENTRY:
+                self.handle_create_entry(command)
+            elif command[LOG_ENTRY_TYPE] == Log_entry_type.ADD_ENTRY:
+                self.handle_add_entry(command)
+            else:
+                logger.warning(f"This action cannot be handled : {command[ACTION]}")
+
+    def handle_create_entry(self, command):
+        # always return a new list, so that the log entry remains consistent
+        client_id_list = list(command[CLIENT_IDS])
+        if self.client_id not in client_id_list:
+            logger.warning("I am not a part of this new group. sed")
+            return
+        group_id = command[GROUP_ID]
+        print(group_id)
+        print(client_id_list)
+        group_public_key = command[GROUP_PUBLIC_KEY]
+        group_private_key = self.get_private_key_from_string(
+            rsa.decrypt(command[ENCRYPTED_GROUP_PRIVATE_KEYS_DICT][self.client_id], self.private_key))
+        new_group = Group(group_id, group_public_key, group_private_key, client_id_list)
+        self.groups_dict[group_id] = new_group
+        logger.info(f"successfully added self to new group with id : {group_id}")
+
+    def handle_add_entry(self, command):
+        group_id = command[GROUP_ID]
+        client_id_to_add = command[CLIENT_ID]
+        if group_id not in self.groups_dict and client_id_to_add != self.client_id:
+            logger.debug("This add entry doesn't concern me. ")
+
+        elif client_id_to_add != self.client_id:
+            self.groups_dict[group_id].client_id_list.append(client_id_to_add)
+            logger.debug(f"Added new member {client_id_to_add} to group : {group_id}")
+        else:
+            group_private_key = command[ENCRYPTED_GROUP_PRIVATE_KEY]
+            group_public_key = None
+            client_id_list = []
+            # figure out the membership of the group from the logs
+            for log_entry in self.state.log[1:]:
+                log_entry_command = log_entry.command
+                if log_entry_command[LOG_ENTRY_TYPE] == Log_entry_type.CREATE_ENTRY \
+                        and log_entry_command[GROUP_ID] == group_id:
+                    client_id_list = list(log_entry_command[CLIENT_IDS])
+                    group_public_key = log_entry_command[GROUP_PUBLIC_KEY]
+                elif log_entry_command[LOG_ENTRY_TYPE] == Log_entry_type.ADD_ENTRY \
+                        and log_entry_command[GROUP_ID] == group_id:
+                    client_id_list.append(command[CLIENT_ID])
+                elif log_entry_command[LOG_ENTRY_TYPE] == Log_entry_type.KICK_ENTRY \
+                        and log_entry_command[GROUP_ID] == group_id:
+                    client_id_list.remove(command[CLIENT_ID])
+                    group_public_key = log_entry_command[GROUP_PUBLIC_KEY]
+
+            new_group = Group(group_id, group_public_key, group_private_key, client_id_list)
+            self.groups_dict[group_id] = new_group
+            logger.info(f"successfully added self to new group with id : {group_id}")
+
+
+    def display_groups(self):
+        logger.info("Following are the groups I am a part of : ")
+        logger.info(f"Total no of groups : {len(self.groups_dict)}")
+        logger.info(self.groups_dict)
+
+    def handle_create_group(self, client_ids):
+        group_id = self.get_new_group_id()
+        group_public_key, group_private_key = self.generate_encryption_keys_for_group()
+        # logger.info("Enter the client ids that you want to add to the group, separated by space : ")
+        client_id_list = client_ids
+
+        # check to see if all the client ids are valid or not!
+        if not all([client_id in self.peer_conn_dict or client_id == self.client_id for client_id in client_id_list]):
+            logger.warning("Some of the Client ids are not valid. Aborting process!")
+            return
+        # add self
+        client_id_list.append(self.client_id)
+        # remove duplicates
+        client_id_list = list(set(client_id_list))
+
+        encrypted_group_private_key_dict = self.encrypt_group_private_key(group_private_key, client_id_list)
+        command = {
+            LOG_ENTRY_TYPE: Log_entry_type.CREATE_ENTRY,
+            REQUEST_ID: self.generate_request_id(),
+            GROUP_ID: group_id,
+            CLIENT_IDS: client_id_list,
+            GROUP_PUBLIC_KEY: group_public_key,
+            ENCRYPTED_GROUP_PRIVATE_KEYS_DICT: encrypted_group_private_key_dict
+        }
+        # TODO: how to get the current term
+        log_entry_request = self.get_client_log_entry_request(command)
+        time.sleep(1)
+        self.send_msg_to_peer(self.leader_id, log_entry_request)
+
+    def handle_add_member(self, param):
+        group_id = param[0]
+        client_id_to_add = param[1]
+        if group_id not in self.groups_dict:
+            logger.warning("Oops! Cannot add a member to an alien group..")
+
+        elif client_id_to_add not in self.peer_conn_dict:
+            logger.warning("Invalid client it. Aborting..")
+
+        elif client_id_to_add in self.groups_dict[group_id].client_id_list:
+            logger.info("Client already added to this group..")
+
+        else:
+            group_private_key_encrypted = rsa.encrypt(
+                self.get_string_from_private_key(self.groups_dict[group_id].private_key),
+                self.public_keys_dict[client_id_to_add])
+            command = {
+                LOG_ENTRY_TYPE: Log_entry_type.ADD_ENTRY,
+                REQUEST_ID: self.generate_request_id(),
+                GROUP_ID: group_id,
+                CLIENT_ID: client_id_to_add,
+                ENCRYPTED_GROUP_PRIVATE_KEY: group_private_key_encrypted
+            }
+            # TODO: how to get the current term
+            log_entry_request = self.get_client_log_entry_request(command)
+            time.sleep(1)
+            self.send_msg_to_peer(self.leader_id, log_entry_request)
 
 
 if __name__ == '__main__':
