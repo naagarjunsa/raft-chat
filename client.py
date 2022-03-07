@@ -316,13 +316,13 @@ class Client:
             elif action == "kick":
                 self.handle_kick_member(user_input[1:])
             elif action == "writeMessage":
-                pass
+                self.handle_write_message(user_input[1:])
             elif action == "printGroup":
-                self.display_groups()
+                self.handle_print_group()
             elif action == "failLink":
-                pass
+                self.handle_fail_link()
             elif action == "fixLink":
-                pass
+                self.handle_fix_link()
             elif action == "failProcess" or user_input == '4':
                 self.server_flag.clear()
                 logger.info("Until next time...")
@@ -346,7 +346,7 @@ class Client:
             try:
                 sock.connect(peer_addr)
                 logger.info("Now connected to peer : " + other_client_id)
-                self.peer_conn_dict[other_client_id] = sock
+                self.peer_conn_dict[other_client_id] = (True, sock)
             except Exception as ex:
                 logger.error(f"Could not CONNECT to peer : {other_client_id}")
                 logger.error(ex)
@@ -364,29 +364,32 @@ class Client:
 
         sender_id = req[SENDER_ID]
 
-        if req[EVENT_KEY] == Event.NEW_CONNECTION:
-            self.re_establish_connection(sender_id)
+        if self.peer_conn_dict[sender_id][0]:
+            if req[EVENT_KEY] == Event.NEW_CONNECTION:
+                self.re_establish_connection(sender_id)
 
-        elif req[EVENT_KEY] == Event.REQUEST_VOTE:
-            self.handle_request_vote(req, sender_id)
+            elif req[EVENT_KEY] == Event.REQUEST_VOTE:
+                self.handle_request_vote(req, sender_id)
 
-        elif req[EVENT_KEY] == Event.RESPOND_VOTE:
-            self.handle_respond_vote(req, sender_id)
+            elif req[EVENT_KEY] == Event.RESPOND_VOTE:
+                self.handle_respond_vote(req, sender_id)
 
-        elif req[EVENT_KEY] == Event.APPEND_ENTRY:
-            self.handle_append_entry(req, sender_id)
+            elif req[EVENT_KEY] == Event.APPEND_ENTRY:
+                self.handle_append_entry(req, sender_id)
 
-        elif req[EVENT_KEY] == Event.RESPOND_ENTRY:
-            self.handle_respond_entry(req, sender_id)
+            elif req[EVENT_KEY] == Event.RESPOND_ENTRY:
+                self.handle_respond_entry(req, sender_id)
 
-        elif req[EVENT_KEY] == Event.NEW_COMMAND:
-            self.handle_new_command(req, sender_id)
+            elif req[EVENT_KEY] == Event.NEW_COMMAND:
+                self.handle_new_command(req, sender_id)
 
-        elif req[EVENT_KEY] == Event.COMMAND_SUCCESS_NOTIFICATION:
-            self.handle_success_notification(req)
+            elif req[EVENT_KEY] == Event.COMMAND_SUCCESS_NOTIFICATION:
+                self.handle_success_notification(req)
 
-        elif req[EVENT_KEY] == Event.CLIENT_REQUEST:
-            self.handle_client_request(req, sender_id)
+            elif req[EVENT_KEY] == Event.CLIENT_REQUEST:
+                self.handle_client_request(req, sender_id)
+        else:
+            logger.info("broken link cannot process message")
 
     # TODO : delete this
     def handle_new_command(self, req, sender_id):
@@ -546,7 +549,7 @@ class Client:
                 self.response_vote_to_candidate(self.state.curr_term, True, sender_id)
 
     def re_establish_connection(self, sender_id):
-        sender_peer_conn = self.peer_conn_dict[sender_id]
+        sender_peer_conn = self.peer_conn_dict[sender_id][1]
         request = {EVENT_KEY: Event.TEST_CONNECTION,
                    SENDER_ID: self.client_id,
                    }
@@ -561,7 +564,7 @@ class Client:
             logger.info("Trying to connect to peer : " + sender_id)
             sock.connect(peer_addr)
             logger.info("Now connected to peer : " + sender_id)
-            self.peer_conn_dict[sender_id] = sock
+            self.peer_conn_dict[sender_id] = (True, sock)
             self.peer_next_log_index[sender_id] = self.state.get_last_log_index() + 1
 
     def respond_entry_to_leader(self, term, success, recv_id):
@@ -587,21 +590,23 @@ class Client:
         self.send_msg_to_peer(recv_id, request)
 
     def send_msg_to_peer(self, peer_id, request):
-        logger.debug(f"Receiver_id : {peer_id} , request : {request}")
-        if peer_id == self.client_id:
-            conn = self.self_server_conn
+        if self.peer_conn_dict[peer_id][0]:
+            logger.debug(f"Receiver_id : {peer_id} , request : {request}")
+            if peer_id == self.client_id:
+                conn = self.self_server_conn
+            else:
+                conn = self.peer_conn_dict[peer_id][1]
+            try:
+                conn.sendall(pickle.dumps(request) + pickle.dumps(Event.EOM))
+                logger.debug(f"Successfully sent msg to peer : {peer_id}")
+            except Exception as ex:
+                # TODO: start leader election ?! Once new leader available, retry operation!
+                logger.error(f"Unable to send msg to peer : {peer_id}")
+                logger.error(ex)
+                # DONE :lets remove the conn from the dict if it fails  -> we are making it a tuplem now 
         else:
-            conn = self.peer_conn_dict[peer_id]
-        try:
-            conn.sendall(pickle.dumps(request) + pickle.dumps(Event.EOM))
-            logger.debug(f"Successfully sent msg to peer : {peer_id}")
-        except Exception as ex:
-            # TODO: start leader election ?! Once new leader available, retry operation!
-            logger.error(f"Unable to send msg to peer : {peer_id}")
-            logger.error(ex)
-            # TODO :lets remove the conn from the dict if it fails ?
-            # del self.peer_conn_dict[peer_id]
-
+            logger.info("cannot send message as link is broken")
+            
     def get_new_group_id(self):
         self.state.group_counter += 1
         group_id = self.client_id + "_" + str(self.state.group_counter)
@@ -732,6 +737,8 @@ class Client:
                 self.handle_add_entry(command)
             elif command[LOG_ENTRY_TYPE] == Log_entry_type.KICK_ENTRY:
                 self.handle_kick_entry(command)
+            elif command[LOG_ENTRY_TYPE] == Log_entry_type.MESSAGE_ENTRY:
+                self.handle_message_entry(command)
             else:
                 logger.warning(f"This action cannot be handled : {command[ACTION]}")
 
@@ -752,9 +759,9 @@ class Client:
     def handle_add_entry(self, command):
         group_id = command[GROUP_ID]
         client_id_to_add = command[CLIENT_ID]
+
         if group_id not in self.groups_dict and client_id_to_add != self.client_id:
             logger.debug("This add entry doesn't concern me. ")
-
         elif client_id_to_add != self.client_id:
             self.groups_dict[group_id].client_id_list.append(client_id_to_add)
             logger.debug(f"Added new member {client_id_to_add} to group : {group_id}")
@@ -785,8 +792,7 @@ class Client:
         group_id = command[GROUP_ID]
         client_id_to_kick = command[CLIENT_ID]
         if group_id not in self.groups_dict:
-            logger.debug("This kick entry doesn't concern me. ")
-
+            logger.debug("This kick entry doesn't concern me.")
         elif client_id_to_kick != self.client_id:
             group = self.groups_dict[group_id]
             group.client_id_list.remove(client_id_to_kick)
@@ -796,15 +802,27 @@ class Client:
                 rsa.decrypt(command[ENCRYPTED_GROUP_PRIVATE_KEYS_DICT][self.client_id], self.private_key))
             group.public_key = group_public_key
             group.private_key = group_private_key
-
         else:
-            del self.groups_dict[group_id]
-            logger.info(f"successfully deleted self from group with id : {group_id}")
+            # just get out the client list, you still maintain the messages.
+            group = self.groups_dict[group_id]
+            group.client_id_list.remove(client_id_to_kick)
 
-    def display_groups(self):
-        logger.info("Following are the groups I am a part of : ")
-        logger.info(f"Total no of groups : {len(self.groups_dict)}")
-        logger.info(self.groups_dict)
+
+    def handle_message_entry(self, command):
+        group_id = command[GROUP_ID]
+        sender_id = command[SENDER_ID]
+        encrypted_message = command[ENCRYPTED_MESSAGE]
+
+        if group_id not in self.groups_dict:
+            logger.debug("this message does not concern me as i was never part of this group")
+        elif self.client_id not in self.groups_dict[group_id]:
+            logger.debug("this message does not concern me as i am kicked out from this group")
+        else:
+            group = self.groups_dict[group_id]
+            message = rsa.decrypt(encrypted_message, group.private_key)
+            group.messages.append((sender_id, message))
+
+            logger.info(f"Added message {message} from sender {sender_id} in group {group_id}")
 
     def handle_create_group(self, client_ids):
         group_id = self.get_new_group_id()
@@ -893,6 +911,46 @@ class Client:
         time.sleep(1)
         self.send_msg_to_peer(self.leader_id, log_entry_request)
 
+    def handle_write_message(self, param):
+        group_id = param[0]
+        message = param[1]
+
+        message_encrypted = rsa.encrypt(message, self.groups_dict[group_id].group_public_key)
+
+        command = {
+            LOG_ENTRY_TYPE: Log_entry_type.MESSAGE_ENTRY,
+            REQUEST_ID: self.generate_request_id(),
+            GROUP_ID: group_id,
+            SENDER_ID: self.client_id,
+            ENCRYPTED_MESSAGE: message_encrypted,
+        }
+
+        log_entry_request = self.get_client_log_entry_request(command)
+        time.sleep(1)
+        self.send_msg_to_peer(self.leader_id, log_entry_request)
+    
+    def handle_fix_link(self, param):
+        src_id = self.client_id
+        dest_id = param[0]
+        if src_id == dest_id:
+            logger.info("Same destination link cannot be fixed")
+        
+        self.peer_conn_dict[dest_id][0] = False
+        
+    def handle_fail_link(self, param):
+        src_id = self.client_id
+        dest_id = param[0]
+
+        if src_id == dest_id:
+            logger.info("Same destination link cannot be removed")
+        
+        self.peer_conn_dict[dest_id][0] = False
+        
+    
+    def handle_print_group(self, param):
+        logger.info("Following are the groups I am a part of : ")
+        logger.info(f"Total no of groups : {len(self.groups_dict)}")
+        logger.info(self.groups_dict)
 
 if __name__ == '__main__':
     client_id = sys.argv[1]

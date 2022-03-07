@@ -114,12 +114,12 @@ class Group:
         self.client_id_list = client_id_list
         self.messages = []
 
-
+    
 class Log_entry_type(enum.Enum):
     CREATE_ENTRY = 1
     ADD_ENTRY = 2
     KICK_ENTRY = 3
-    MESSAGE_EMTRY = 4
+    MESSAGE_ENTRY = 4
     DUMMY = 5
 
 # class Command:
