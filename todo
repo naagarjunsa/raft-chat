@@ -1,12 +1,12 @@
 1. make peers recoverable : kill and bring it back up, other peers should be able to connect back with it
-2. save persistent state to disk :  but when ??
+2. save persistent state to disk :  but when ??  - done
 3.
 
 
 open questions :
-1. should we have heartbeat timeout individually for each peer
-2. should we not send a heartbeat, until we get a response back from the peer!
-3. When does everyone add themselves to the group ? When they get it in their logs or only when it is committed.
+1. should we have heartbeat timeout individually for each peer - done
+2. should we not send a heartbeat, until we get a response back from the peer! - done
+3. When does everyone add themselves to the group ? When they get it in their logs or only when it is committed. - done
 
 
 log structure considerations:
@@ -24,9 +24,9 @@ async client considerations :
 Commit-log:
 commmit_idx + persistent state + client response done
 use re-entrant locks!
-cannot use long messages for testing. Limitation of rsa. Any other algo to be considered ?
+cannot use long messages for testing. Limitation of rsa. Any other algo to be considered ? - done
 
-let every client maintain all the groups ? - yes
+let every client maintain all the groups ? - no
 
 
 TODO :
