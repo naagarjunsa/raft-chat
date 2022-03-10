@@ -114,6 +114,16 @@ class Group:
         self.client_id_list = client_id_list
         self.messages = []
 
+    def __repr__(self):
+        output_str_list = []
+        output_str_list.append(f"group_id: {self.group_id}")
+        output_str_list.append(f"public_key: {self.public_key}")
+        output_str_list.append(f"private_key: < {self.private_key} >")
+        output_str_list.append(f"client_id_list: < {self.client_id_list} >")
+        output_str_list.append(f"Private key: < {self.messages} >")
+
+        return "\n" + " ".join(output_str_list)
+
     
 class Log_entry_type(enum.Enum):
     CREATE_ENTRY = 1

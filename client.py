@@ -95,7 +95,7 @@ class Client:
                 self.state = pickle.load(f)
                 logger.info("state was retrieved successfully!")
                 # act on the entries once the process comes back up
-                self.act_on_commited_entries(1, self.state.commit_idx)
+                # self.act_on_commited_entries(1, self.state.commit_idx)
         except Exception as ex:
             self.state = State(0, None, [LogEntry(0, 0, {LOG_ENTRY_TYPE: Log_entry_type.DUMMY})])
             logger.warning("No restoration file found!")
@@ -304,11 +304,14 @@ class Client:
             # logger.info(" - failLink <src> <dest>")
             # logger.info(" - fixLink <src> <dest>")
             # logger.info(" - failProcess")
-            user_input = input("Client prompt >> ").strip().split()
+            logger.info("Client prompt >> ")
+            user_input = input().strip().split()
 
             if not user_input:
                 continue
             action = user_input[0]
+            # load state before every action
+            self.act_on_commited_entries(1, self.state.commit_idx)
             if action == "createGroup":
                 self.handle_create_group(user_input[1:])
             elif action == "add":
@@ -318,11 +321,11 @@ class Client:
             elif action == "writeMessage":
                 self.handle_write_message(user_input[1:])
             elif action == "printGroup":
-                self.handle_print_group()
+                self.handle_print_group(user_input[1:])
             elif action == "failLink":
-                self.handle_fail_link()
+                self.handle_fail_link(user_input[1:])
             elif action == "fixLink":
-                self.handle_fix_link()
+                self.handle_fix_link(user_input[1:])
             elif action == "failProcess" or user_input == '4':
                 self.server_flag.clear()
                 logger.info("Until next time...")
@@ -333,7 +336,8 @@ class Client:
                 logger.info(self.state.log)
             else:
                 logger.warning("Incorrect menu option. Please try again..")
-                continue
+            # clear state after every action
+            self.groups_dict.clear()
 
     def connect_to_other_peers(self):
         # connect to all other peers
@@ -346,7 +350,7 @@ class Client:
             try:
                 sock.connect(peer_addr)
                 logger.info("Now connected to peer : " + other_client_id)
-                self.peer_conn_dict[other_client_id] = (True, sock)
+                self.peer_conn_dict[other_client_id] = [True, sock]
             except Exception as ex:
                 logger.error(f"Could not CONNECT to peer : {other_client_id}")
                 logger.error(ex)
@@ -439,7 +443,7 @@ class Client:
                     self.restoration_in_progress[sender_id] = False
                     if commit_idx_updated:
                         self.save_state()
-                        self.act_on_commited_entries(prev_commit_idx + 1, self.state.commit_idx)
+                        # self.act_on_commited_entries(prev_commit_idx + 1, self.state.commit_idx)
                         self.respond_client_with_success(prev_commit_idx + 1, self.state.commit_idx)
 
     def handle_append_entry(self, req, sender_id):
@@ -491,14 +495,14 @@ class Client:
                 if commit_idx > self.state.commit_idx:
                     prev_commit_idx = self.state.commit_idx
                     self.state.update_commit_idx(commit_idx)
-                    self.act_on_commited_entries(prev_commit_idx + 1, self.state.commit_idx)
+                    # self.act_on_commited_entries(prev_commit_idx + 1, self.state.commit_idx)
                     self.save_state()
                     logger.info(f"COMMIT idx updated to {self.state.commit_idx}")
                 self.respond_entry_to_leader(term, True, sender_id)
 
 
             else:
-                logger.info("logs are not consistent. Need to go further back in time in the logs")
+                logger.debug("logs are not consistent. Need to go further back in time in the logs")
                 self.respond_entry_to_leader(term, False, sender_id)
 
     def handle_respond_vote(self, req, sender_id):
@@ -564,7 +568,7 @@ class Client:
             logger.info("Trying to connect to peer : " + sender_id)
             sock.connect(peer_addr)
             logger.info("Now connected to peer : " + sender_id)
-            self.peer_conn_dict[sender_id] = (True, sock)
+            self.peer_conn_dict[sender_id] = [True, sock]
             self.peer_next_log_index[sender_id] = self.state.get_last_log_index() + 1
 
     def respond_entry_to_leader(self, term, success, recv_id):
@@ -618,9 +622,6 @@ class Client:
 
     @staticmethod
     def get_string_from_private_key(private_key):
-        print("-".join(
-            [str(i) for i in [private_key.n, private_key.e, private_key.d, private_key.p, private_key.q]]).encode(
-            'utf8'))
         return "-".join(
             [str(i) for i in [private_key.n, private_key.e, private_key.d, private_key.p, private_key.q]]).encode(
             'utf8')
@@ -690,7 +691,7 @@ class Client:
     def respond_client_with_success(self, commit_start_idx, commit_end_idx):
         for log_entry in self.state.log[commit_start_idx: commit_end_idx + 1]:
             request_id = log_entry.command[REQUEST_ID]
-            print(request_id)
+
             initiator_id = request_id.split('_')[0]
 
             request = {EVENT_KEY: Event.COMMAND_SUCCESS_NOTIFICATION,
@@ -729,7 +730,6 @@ class Client:
 
     def act_on_commited_entries(self, prev_commit_idx, commit_idx):
         for log_entry in self.state.log[prev_commit_idx:commit_idx + 1]:
-            print("will commit an entry now")
             command = log_entry.command
             if command[LOG_ENTRY_TYPE] == Log_entry_type.CREATE_ENTRY:
                 self.handle_create_entry(command)
@@ -746,7 +746,7 @@ class Client:
         # always return a new list, so that the log entry remains consistent
         client_id_list = list(command[CLIENT_IDS])
         if self.client_id not in client_id_list:
-            logger.warning("I am not a part of this new group. sed")
+            logger.debug("I am not a part of this new group. sed")
             return
         group_id = command[GROUP_ID]
         group_public_key = command[GROUP_PUBLIC_KEY]
@@ -754,7 +754,7 @@ class Client:
             rsa.decrypt(command[ENCRYPTED_GROUP_PRIVATE_KEYS_DICT][self.client_id], self.private_key))
         new_group = Group(group_id, group_public_key, group_private_key, client_id_list)
         self.groups_dict[group_id] = new_group
-        logger.info(f"successfully added self to new group with id : {group_id}")
+        logger.debug(f"successfully added self to new group with id : {group_id}")
 
     def handle_add_entry(self, command):
         group_id = command[GROUP_ID]
@@ -766,7 +766,8 @@ class Client:
             self.groups_dict[group_id].client_id_list.append(client_id_to_add)
             logger.debug(f"Added new member {client_id_to_add} to group : {group_id}")
         else:
-            group_private_key = command[ENCRYPTED_GROUP_PRIVATE_KEY]
+            group_private_key = self.get_private_key_from_string(
+                rsa.decrypt(command[ENCRYPTED_GROUP_PRIVATE_KEY], self.private_key))
             group_public_key = None
             client_id_list = []
             # figure out the membership of the group from the logs
@@ -786,7 +787,7 @@ class Client:
 
             new_group = Group(group_id, group_public_key, group_private_key, client_id_list)
             self.groups_dict[group_id] = new_group
-            logger.info(f"successfully added self to new group with id : {group_id}")
+            logger.debug(f"successfully added self to new group with id : {group_id}")
 
     def handle_kick_entry(self, command):
         group_id = command[GROUP_ID]
@@ -807,7 +808,6 @@ class Client:
             group = self.groups_dict[group_id]
             group.client_id_list.remove(client_id_to_kick)
 
-
     def handle_message_entry(self, command):
         group_id = command[GROUP_ID]
         sender_id = command[SENDER_ID]
@@ -815,14 +815,14 @@ class Client:
 
         if group_id not in self.groups_dict:
             logger.debug("this message does not concern me as i was never part of this group")
-        elif self.client_id not in self.groups_dict[group_id]:
+        elif self.client_id not in self.groups_dict[group_id].client_id_list:
             logger.debug("this message does not concern me as i am kicked out from this group")
         else:
             group = self.groups_dict[group_id]
-            message = rsa.decrypt(encrypted_message, group.private_key)
-            group.messages.append((sender_id, message))
+            message = rsa.decrypt(encrypted_message, group.private_key).decode('utf8')
+            group.messages.append(" : ".join([sender_id, message]))
 
-            logger.info(f"Added message {message} from sender {sender_id} in group {group_id}")
+            logger.debug(f"Added message {message} from sender {sender_id} in group {group_id}")
 
     def handle_create_group(self, client_ids):
         group_id = self.get_new_group_id()
@@ -912,10 +912,13 @@ class Client:
         self.send_msg_to_peer(self.leader_id, log_entry_request)
 
     def handle_write_message(self, param):
-        group_id = param[0]
-        message = param[1]
 
-        message_encrypted = rsa.encrypt(message, self.groups_dict[group_id].group_public_key)
+        group_id = param[0]
+        if len(param) < 2:
+            logger.error("No message found. Try again..")
+        message = " ".join(param[1:]).encode('utf8')
+
+        message_encrypted = rsa.encrypt(message, self.groups_dict[group_id].public_key)
 
         command = {
             LOG_ENTRY_TYPE: Log_entry_type.MESSAGE_ENTRY,
@@ -945,12 +948,21 @@ class Client:
             logger.info("Same destination link cannot be removed")
         
         self.peer_conn_dict[dest_id][0] = False
-        
-    
+
     def handle_print_group(self, param):
-        logger.info("Following are the groups I am a part of : ")
-        logger.info(f"Total no of groups : {len(self.groups_dict)}")
-        logger.info(self.groups_dict)
+        group_id = param[0]
+        # logger.info("Following are the groups I am a part of : ")
+        # logger.info(f"Total no of groups : {len(self.groups_dict)}")
+        if group_id not in self.groups_dict:
+            logger.info(f"No message for you from group : {group_id}. Sed")
+        else:
+            if not self.groups_dict[group_id].messages:
+                logger.info(f"No message for you in group : {group_id}")
+            else:
+                logger.info(f"Here are your messages from group : {group_id}")
+                all_messages = "\n" + "\n".join(self.groups_dict[group_id].messages)
+                logger.info(all_messages)
+
 
 if __name__ == '__main__':
     client_id = sys.argv[1]

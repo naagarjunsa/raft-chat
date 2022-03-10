@@ -16,7 +16,7 @@ class Client_Menu:
         # logger.info("- Press 1 to CreateGroup") createGroup 1 2 3 - done
         # logger.info("- Press 2 to Add Member")  add 2_1 5 - done
         # logger.info("- Press 3 to Kick Member") kick 2_1 5 - done
-        # logger.info("- Press 4 to Write Message")
+        # logger.info("- Press 4 to Write Message") writeMessage 2_1 hey what is up 5
         # logger.info("- Press 5 to Print Group") printGroup 2_1
         # logger.info("- Press 6 to Fail Link")
         # logger.info("- Press 7 to Fix Link")
