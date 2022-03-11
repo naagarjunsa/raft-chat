@@ -7,7 +7,7 @@ import socket
 import sys
 import time
 import types
-
+import pickle
 import rsa
 
 from client_menu import Client_Menu
@@ -326,11 +326,11 @@ class Client:
                 self.handle_fail_link(user_input[1:])
             elif action == "fixLink":
                 self.handle_fix_link(user_input[1:])
-            elif action == "failProcess" or user_input == '4':
+            elif action == "failProcess" or action == '4':
                 self.server_flag.clear()
                 logger.info("Until next time...")
                 break
-            elif user_input == "9":
+            elif action == "9":
                 # TODO: just testting append RPC for now
                 logger.info("here are the logs : ")
                 logger.info(self.state.log)
@@ -384,8 +384,17 @@ class Client:
             elif req[EVENT_KEY] == Event.RESPOND_ENTRY:
                 self.handle_respond_entry(req, sender_id)
 
-            elif req[EVENT_KEY] == Event.NEW_COMMAND:
-                self.handle_new_command(req, sender_id)
+            elif req[EVENT_KEY] == Event.NEW_CONNECTION:
+                self.re_establish_connection(sender_id)
+
+            # elif req[EVENT_KEY] == Event.NEW_COMMAND:
+            #     self.handle_new_command(req, sender_id)
+            #
+            # elif req[EVENT_KEY] == Event.FAIL_LINK:
+            #     self.handle_fail_link_command(sender_id)
+            #
+            # elif req[EVENT_KEY] == Event.FIX_LINK:
+            #     self.handle_fix_link_command(sender_id)
 
             elif req[EVENT_KEY] == Event.COMMAND_SUCCESS_NOTIFICATION:
                 self.handle_success_notification(req)
@@ -546,8 +555,9 @@ class Client:
 
             if self.voted_for is not None:
                 self.response_vote_to_candidate(self.state.curr_term, False, sender_id)
-            # elif self.last_log_term > last_log_term or (self.last_log_term == last_log_term and self.last_log_idx > last_log_idx):
-            #    self.response_vote_to_candidate(self.state.curr_term, False)
+            elif self.state.get_last_log_term() > last_log_term or (self.state.get_last_log_term() == last_log_term and
+                                                                    self.state.get_last_log_index() > last_log_idx):
+               self.response_vote_to_candidate(self.state.curr_term, False, sender_id)
             else:
                 self.voted_for = sender_id
                 self.response_vote_to_candidate(self.state.curr_term, True, sender_id)
@@ -937,17 +947,38 @@ class Client:
         dest_id = param[0]
         if src_id == dest_id:
             logger.info("Same destination link cannot be fixed")
-        
-        self.peer_conn_dict[dest_id][0] = False
+
+        elif dest_id not in self.peer_conn_dict:
+            logger.warning("Invalid connection id. Try again!")
+        else:
+            request = {
+                EVENT_KEY: Event.FIX_LINK,
+                SENDER_ID: self.client_id
+            }
+            # logger.info(f"Send FIX LINK event to peer : {dest_id}")
+            # self.send_msg_to_peer(dest_id, request)
+            self.peer_conn_dict[dest_id][0] = False
+            logger.info(f"FIXED LINK with peer : {dest_id}")
         
     def handle_fail_link(self, param):
         src_id = self.client_id
         dest_id = param[0]
 
         if src_id == dest_id:
-            logger.info("Same destination link cannot be removed")
-        
-        self.peer_conn_dict[dest_id][0] = False
+            logger.warning("Same destination link cannot be removed")
+
+        elif dest_id not in self.peer_conn_dict:
+            logger.warning("Invalid connection id. Try again!")
+        else:
+            request = {
+                EVENT_KEY: Event.FAIL_LINK,
+                SENDER_ID: self.client_id
+            }
+            # logger.info(f"Send FAIL LINK event to peer : {dest_id}")
+            # self.send_msg_to_peer(dest_id, request)
+            self.peer_conn_dict[dest_id][0] = False
+            logger.info(f"FAILED LINK with peer : {dest_id}")
+
 
     def handle_print_group(self, param):
         group_id = param[0]
@@ -962,6 +993,14 @@ class Client:
                 logger.info(f"Here are your messages from group : {group_id}")
                 all_messages = "\n" + "\n".join(self.groups_dict[group_id].messages)
                 logger.info(all_messages)
+
+    def handle_fail_link_command(self, sender_id):
+        self.peer_conn_dict[sender_id][0] = False
+        logger.info(f"FAILED LINK with peer : {sender_id}")
+
+    def handle_fix_link_command(self, sender_id):
+        self.peer_conn_dict[sender_id][0] = True
+        logger.info(f"FIXED LINK with peer : {sender_id}")
 
 
 if __name__ == '__main__':

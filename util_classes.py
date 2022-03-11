@@ -1,8 +1,6 @@
 import enum
-import pickle
 import threading
 from typing import List
-import os
 
 from constants import *
 
@@ -100,9 +98,11 @@ class Event(enum.Enum):
     NEW_GROUP = 6
     NEW_COMMAND = 7
     NEW_CONNECTION = 8
-    TEST_CONNECTION = 9
-    COMMAND_SUCCESS_NOTIFICATION = 10
-    CLIENT_REQUEST = 11
+    FAIL_LINK = 9
+    FIX_LINK = 10
+    TEST_CONNECTION = 11
+    COMMAND_SUCCESS_NOTIFICATION = 12
+    CLIENT_REQUEST = 13
 
 
 class Group:
